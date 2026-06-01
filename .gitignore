@@ -1,3 +1,13 @@
 # Environment
 .env
 .vscode/
+
+__pycache__
+*.pt
+*.json
+runs/
+weights/
+en_es_weights/
+models/
+
+wandb/
