@@ -22,7 +22,7 @@ class BilingualDataset(Dataset):
     def __len__(self):
         return len(self.ds)
     
-    def __getitem__backup(self, index: Any) -> Any:
+    def __getitem__(self, index: Any) -> Any:
         src_target_pair = self.ds[index]
         src_text = src_target_pair['translation'][self.src_lang]
         tgt_text = src_target_pair['translation'][self.tgt_lang]
@@ -44,16 +44,20 @@ class BilingualDataset(Dataset):
                 torch.tensor(enc_input_tokens, dtype=torch.int64),
                 self.eos_token,
                 torch.tensor([self.pad_token] * enc_num_padding_tokens, dtype=torch.int64)
-            ]
+                # self.pad_token.repeat(enc_num_padding_tokens)
+            ],
+            dim=0
         )
 
         # Add SOS to the decoder input
         decoder_input = torch.cat(
             [
-                self.eos_token,
+                self.sos_token,
                 torch.tensor(dec_input_tokens, dtype=torch.int64),
                 torch.tensor([self.pad_token] * dec_num_padding_tokens, dtype=torch.int64)
-            ]
+                # self.pad_token.repeat(dec_num_padding_tokens)
+            ],
+            dim=0
         )
 
         # Add EOS to the label (what we expect as output from th decoder)
@@ -62,7 +66,8 @@ class BilingualDataset(Dataset):
                 torch.tensor(dec_input_tokens, dtype=torch.int64),
                 self.eos_token,
                 torch.tensor([self.pad_token] * dec_num_padding_tokens, dtype=torch.int64)
-            ]
+            ],
+            dim=0
         )
 
         assert encoder_input.size(0) == self.seq_len
@@ -78,45 +83,6 @@ class BilingualDataset(Dataset):
             "src_text": src_text,
             "tgt_text": tgt_text
         }
-
-
-    def __getitem__(self, index: Any) -> Any:
-        src_target_pair = self.ds[index]
-        src_text = src_target_pair['translation'][self.src_lang]
-        tgt_text = src_target_pair['translation'][self.tgt_lang]
-
-        # Transform the text into tokens
-        enc_input_tokens = self.tokenizer_src.encode(src_text).ids
-        dec_input_tokens = self.tokenizer_tgt.encode(tgt_text).ids
-
-        assert len(enc_input_tokens) <= self.seq_len - 2
-        assert len(dec_input_tokens) <= self.seq_len - 1
-
-        # Combine with control tokens (Unpadded tensors)
-        encoder_input = torch.cat([
-            self.sos_token,
-            torch.tensor(enc_input_tokens, dtype=torch.int64),
-            self.eos_token
-        ])
-        
-        decoder_input = torch.cat([
-            self.sos_token, # Note: Transfomer decoder inputs usually start with SOS, yours had EOS, adjust if needed
-            torch.tensor(dec_input_tokens, dtype=torch.int64)
-        ])
-        
-        label = torch.cat([
-            torch.tensor(dec_input_tokens, dtype=torch.int64),
-            self.eos_token
-        ])
-
-        return {
-            "encoder_input": encoder_input,
-            "decoder_input": decoder_input,
-            "label": label,
-            "src_text": src_text,
-            "tgt_text": tgt_text
-        }
-
 
 def causal_mask(size):
 

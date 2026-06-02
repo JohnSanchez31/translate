@@ -2,6 +2,35 @@ import torch
 import torch.nn as nn
 import math
 
+class LayerNormalization(nn.Module):
+
+    def __init__(self, features: int, eps: float = 10**-6):
+        super().__init__()
+        self.eps = eps
+
+        self.alpha = nn.Parameter(torch.ones(features)) # Multiplicative factor
+        self.bias = nn.Parameter(torch.zeros(features)) # Additive factor
+
+    def forward(self, x):
+        # x: (batch, seq_len, hidden_size)
+        # Keep the dimension for broadcasting
+        mean = x.mean(dim=-1, keepdim=True)
+        std = x.std(dim=-1, keepdim=True)
+
+        return self.alpha * (x - mean) / (std + self.eps) + self.bias
+    
+class FeedForwardBlock(nn.Module):
+
+    def __init__(self, d_model: int, d_ff: int, dropout: float):
+        super().__init__()
+
+        self.linear1 = nn.Linear(d_model, d_ff) # w1 and b1
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(d_ff, d_model) # w2 and b2
+
+    def forward(self, x):
+        # (batch, seq_len, d_model) -> (batch, seq_len, d_ff) -> (batch, seq_len, d_model)
+        return self.linear2(self.dropout(torch.relu(self.linear1(x))))
 
 class InputEmbedding(nn.Module):
     
@@ -51,40 +80,19 @@ class PositionalEncoding(nn.Module):
 
     
     def forward(self, x):
-        x = x + self.pos_embedding[:, :x.shape[1], :].requires_grad_(False) # Not learned
+        x = x + (self.pos_embedding[:, :x.shape[1], :]).requires_grad_(False) # Not learned
         return self.dropout(x)
     
+class ResidualConnection(nn.Module):
 
-
-class LayerNormalization(nn.Module):
-
-    def __init__(self, features: int, eps: float = 10**-6):
+    def __init__(self, features: int, dropout: float):
         super().__init__()
-        self.eps = eps
-
-        self.alpha = nn.Parameter(torch.ones(features)) # Multiplicative factor
-        self.bias = nn.Parameter(torch.zeros(features)) # Additive factor
-
-    def forward(self, x):
-        # x: (batch, seq_len, hidden_size)
-        # Keep the dimension for broadcasting
-        mean = x.mean(dim=-1, keepdim=True)
-        std = x.std(dim=-1, keepdim=True)
-
-        return self.alpha * (x - mean) / (std + self.eps) + self.bias
-    
-class FeedForwardBlock(nn.Module):
-
-    def __init__(self, d_model: int, d_ff: int, dropout: float):
-        super().__init__()
-
-        self.linear1 = nn.Linear(d_model, d_ff) # w1 and b1
         self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(d_ff, d_model) # w2 and b2
+        self.norm = LayerNormalization(features)
 
-    def forward(self, x):
-        # (batch, seq_len, d_model) -> (batch, seq_len, d_ff) -> (batch, seq_len, d_model)
-        return self.linear2(self.dropout(torch.relu(self.linear1(x))))
+
+    def forward(self, x, sublayer):
+        return x + self.dropout(sublayer(self.norm(x)))
 
 
 class MultiHeadAttention(nn.Module):
@@ -98,10 +106,10 @@ class MultiHeadAttention(nn.Module):
 
         self.d_k = d_model // h
 
-        self.w_q = nn.Linear(d_model, d_model) # wq
-        self.w_k = nn.Linear(d_model, d_model) # wk
-        self.w_v = nn.Linear(d_model, d_model) # wv
-        self.w_o = nn.Linear(d_model, d_model) # wo
+        self.w_q = nn.Linear(d_model, d_model, bias=False) # wq
+        self.w_k = nn.Linear(d_model, d_model, bias=False) # wk
+        self.w_v = nn.Linear(d_model, d_model, bias=False) # wv
+        self.w_o = nn.Linear(d_model, d_model, bias=False) # wo
 
         self.dropout = nn.Dropout(dropout)
 
@@ -123,7 +131,7 @@ class MultiHeadAttention(nn.Module):
 
 
     
-    def forward(self, q, k, v, mask=None):
+    def forward(self, q, k, v, mask):
         query = self.w_q(q) # (batch, seq_len, d_model) --> (batch, seq_len, d_model)
         key = self.w_k(k)   # (batch, seq_len, d_model) --> (batch, seq_len, d_model)
         value = self.w_v(v) # (batch, seq_len, d_model) --> (batch, seq_len, d_model)
@@ -140,18 +148,6 @@ class MultiHeadAttention(nn.Module):
 
         # (batch, seq_len, d_model) --> (batch, seq_len, d_model)
         return self.w_o(x) 
-
-
-class ResidualConnection(nn.Module):
-
-    def __init__(self, features: int, dropout: float):
-        super().__init__()
-        self.dropout = nn.Dropout(dropout)
-        self.norm = LayerNormalization(features)
-
-
-    def forward(self, x, sublayer):
-        return x + self.dropout(sublayer(self.norm(x)))
 
     
 class EncoderBlock(nn.Module):

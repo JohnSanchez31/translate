@@ -38,12 +38,13 @@ def greedy_decode(
     decoder_input = torch.empty(1,1).fill_(sos_idx).type_as(source).to(device)
     while True:
         if decoder_input.size(1) >= max_len:
+            print("Reached max length, stopping decoding")
             break
 
         # Build mask for the target (decoder input)
         decoder_mask = causal_mask(decoder_input.size(1)).type_as(source_mask).to(device)
 
-        # Calculate the ourput od the decoder
+        # Calculate the output of the decoder
         out = model.decode(encoder_output, source_mask, decoder_input, decoder_mask)
 
         # Get the next token
@@ -133,6 +134,20 @@ def get_or_build_tokenizer(config, ds, lang):
     return tokenizer
 
 
+def filter_dataset(ds, tokenizer_src, tokenizer_tgt, config):
+    filtered_examples = []
+    for item in ds:
+        src_ids = tokenizer_src.encode(item['translation'][config['lang_src']]).ids
+        tgt_ids = tokenizer_tgt.encode(item['translation'][config['lang_tgt']]).ids
+
+        if len(src_ids) <= config['seq_len'] - 2 and len(tgt_ids) <= config['seq_len'] - 1:
+            filtered_examples.append(item)
+
+    removed = len(ds) - len(filtered_examples)
+    print(f"Removed {removed} examples ({100*removed/len(ds):.2f}%)")
+    
+    return filtered_examples
+
 def get_ds(config):
     ds_raw = load_dataset('opus_books', f'{config["lang_src"]}-{config["lang_tgt"]}', split="train")
 
@@ -140,10 +155,12 @@ def get_ds(config):
     tokenizer_src = get_or_build_tokenizer(config, ds_raw, config['lang_src'])
     tokenizer_tgt = get_or_build_tokenizer(config, ds_raw, config['lang_tgt'])
 
+    filtered_ds = filter_dataset(ds_raw, tokenizer_src, tokenizer_tgt, config)
+
     # Keep 90% for training and 10% for validation
-    train_ds_size = int(0.9 * len(ds_raw))
-    valid_ds_size = len(ds_raw) - train_ds_size
-    train_ds_raw, val_ds_raw = random_split(ds_raw, [train_ds_size, valid_ds_size])
+    train_ds_size = int(0.9 * len(filtered_ds))
+    valid_ds_size = len(filtered_ds) - train_ds_size
+    train_ds_raw, val_ds_raw = random_split(filtered_ds, [train_ds_size, valid_ds_size])
 
     train_ds = BilingualDataset(
         train_ds_raw,
@@ -166,9 +183,9 @@ def get_ds(config):
     max_len_src = 0
     max_len_tgt = 0
 
-    for item in ds_raw:
+    for item in filtered_ds:
         src_ids = tokenizer_src.encode(item['translation'][config['lang_src']]).ids
-        tgt_ids = tokenizer_src.encode(item['translation'][config['lang_tgt']]).ids
+        tgt_ids = tokenizer_tgt.encode(item['translation'][config['lang_tgt']]).ids
         max_len_src = max(max_len_src, len(src_ids))
         max_len_tgt = max(max_len_tgt, len(tgt_ids))
 
@@ -178,100 +195,6 @@ def get_ds(config):
 
     train_dataloader = DataLoader(train_ds, batch_size=config["batch_size"], shuffle=True)
     val_dataloader = DataLoader(val_ds, batch_size=1, shuffle=True)
-
-    return train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt
-
-
-def filter_dataset(ds, tokenizer_src, tokenizer_tgt, config):
-    filtered_examples = []
-    for item in ds:
-        src_ids = tokenizer_src.encode(item['translation'][config['lang_src']]).ids
-        tgt_ids = tokenizer_tgt.encode(item['translation'][config['lang_tgt']]).ids
-
-        if len(src_ids) <= config['seq_len'] - 2 and len(tgt_ids) <= config['seq_len'] - 1:
-            filtered_examples.append(item)
-
-    removed = len(ds) - len(filtered_examples)
-    print(f"Removed {removed} examples ({100*removed/len(ds):.2f}%)")
-    
-    return filtered_examples
-
-def get_ds_optimized(config):
-    ds_raw = load_dataset('opus_books', f'{config["lang_src"]}-{config["lang_tgt"]}', split="train")
-
-    tokenizer_src = get_or_build_tokenizer(config, ds_raw, config['lang_src'])
-    tokenizer_tgt = get_or_build_tokenizer(config, ds_raw, config['lang_tgt'])
-
-    filtered_examples: list = filter_dataset(ds_raw, tokenizer_src, tokenizer_tgt, config)
-
-    train_ds_size = int(0.9 * len(filtered_examples))
-    valid_ds_size = len(filtered_examples) - train_ds_size
-    train_ds_raw, val_ds_raw = random_split(filtered_examples, [train_ds_size, valid_ds_size])
-
-    train_ds = BilingualDataset(
-        train_ds_raw, 
-        tokenizer_src, 
-        tokenizer_tgt, 
-        config['lang_src'], 
-        config["lang_tgt"],
-        config['seq_len']
-    )
-    val_ds = BilingualDataset(
-        val_ds_raw, 
-        tokenizer_src, 
-        tokenizer_tgt, 
-        config['lang_src'], 
-        config["lang_tgt"],
-        config['seq_len']
-    )
-
-    # Define a collate function to dynamically pad tensors per batch
-    def transformer_collate_fn(batch):
-        enc_inputs = [item['encoder_input'] for item in batch]
-        dec_inputs = [item['decoder_input'] for item in batch]
-        labels = [item['label'] for item in batch]
-        
-        pad_token_id = tokenizer_src.token_to_id("[PAD]") # Ensure this matches your class pad token
-
-        # 1. Dynamically pad tensors to the batch maximum length
-        encoder_input_padded = pad_sequence(enc_inputs, batch_first=True, padding_value=pad_token_id)
-        decoder_input_padded = pad_sequence(dec_inputs, batch_first=True, padding_value=pad_token_id)
-        label_padded = pad_sequence(labels, batch_first=True, padding_value=pad_token_id)
-
-        # 2. Generate attention masks dynamically based on actual batch dimensions
-        # Shape: (Batch, 1, 1, seq_len)
-        encoder_mask = (encoder_input_padded != pad_token_id).unsqueeze(1).unsqueeze(2).int()
-        
-        # Shape: (Batch, 1, seq_len, seq_len)
-        dec_seq_len = decoder_input_padded.size(1)
-        decoder_padding_mask = (decoder_input_padded != pad_token_id).unsqueeze(1).unsqueeze(2)
-        # causal_mask must accept the batch sequence length dimension
-        decoder_mask = decoder_padding_mask.int() & causal_mask(dec_seq_len).to(decoder_input_padded.device)
-
-        return {
-            "encoder_input": encoder_input_padded,
-            "decoder_input": decoder_input_padded,
-            "encoder_mask": encoder_mask,
-            "decoder_mask": decoder_mask,
-            "label": label_padded,
-            "src_text": [item['src_text'] for item in batch],
-            "tgt_text": [item['tgt_text'] for item in batch]
-        }
-
-
-    # Pass the collate_fn to your DataLoaders
-    train_dataloader = DataLoader(
-        train_ds, 
-        batch_size=config["batch_size"], 
-        shuffle=True, 
-        collate_fn=transformer_collate_fn
-    )
-    val_dataloader = DataLoader(
-        val_ds, 
-        batch_size=1, 
-        shuffle=True, 
-        collate_fn=transformer_collate_fn
-    )
 
     return train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt
 
@@ -294,7 +217,7 @@ def train_model(config):
 
     Path(config['model_folder']).mkdir(parents=True, exist_ok=True)
 
-    train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt = get_ds_optimized(config)
+    train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt = get_ds(config)
 
     model = get_model(
         config, 
@@ -307,19 +230,6 @@ def train_model(config):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], betas=(0.9, 0.98), eps=1e-9)
 
-    # Define a learning rate scheduler (e.g., LambdaLR for Noam behavior)
-    def noam_lr_lambda(current_step: int):
-        # Prevent division by zero on step 0
-        step = max(current_step, 1)
-        warmup_steps = 4000
-        d_model = config['d_model'] # e.g., 512
-    
-        # Scale factor matches the Noam formula characteristics
-        return (d_model ** -0.5) * min(step ** -0.5, step * (warmup_steps ** -1.5))
-    
-    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=noam_lr_lambda)
-
-
     initial_epoch = 0
     global_step = 0
     preload = config['preload']
@@ -330,8 +240,8 @@ def train_model(config):
     )
     if model_filename:
         print(f"Preloading model {model_filename}")
-        model.load_state_dict(state['model_state_dict'])
         state = torch.load(model_filename)
+        model.load_state_dict(state['model_state_dict'])
         initial_epoch = state['epoch'] + 1
         optimizer.load_state_dict(state['optimizer_state_dict'])
         global_step = state['global_step']
@@ -342,7 +252,8 @@ def train_model(config):
     # For loss function we are using the CrossEntropyLoss
     # Label_smoothing
     loss_fn = nn.CrossEntropyLoss(
-        ignore_index=tokenizer_src.token_to_id('[PAD]'), 
+        # ignore_index=tokenizer_src.token_to_id('[PAD]'), 
+        ignore_index=tokenizer_tgt.token_to_id('[PAD]'), # Ignore the padding token in the target language
         label_smoothing=0.1
     ).to(device)
 
@@ -381,10 +292,12 @@ def train_model(config):
 
             # Update the weights 
             optimizer.step()
-            optimizer.zero_grad()
-            lr_scheduler.step()
+            optimizer.zero_grad(set_to_none=True)
 
             global_step += 1
+
+        # Debugging: Print the norm of the embedding weights at the beginning of each epoch
+        print(model.src_embedding.embedding.weight.norm())
 
         run_validation(
             model, 
@@ -396,7 +309,7 @@ def train_model(config):
             lambda msg: batch_iterator.write(msg), 
             global_step, 
             writer,
-            num_examples=5
+            num_examples=3
         )
 
         # Save the model at the end of every epoch

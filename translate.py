@@ -49,10 +49,10 @@ def translate(sentence: str):
         decoder_input = torch.empty(1, 1).fill_(tokenizer_tgt.token_to_id('[SOS]')).type_as(source).to(device)
 
         # Print the source sentence and target start prompt
-        if label != "": print(f"{f'ID: ':>12}{id}") 
-        print(f"{f'SOURCE: ':>12}{sentence}")
-        if label != "": print(f"{f'TARGET: ':>12}{label}") 
-        print(f"{f'PREDICTED: ':>12}", end='')
+        # if label != "": print(f"{f'ID: ':>12}{id}") 
+        # print(f"{f'SOURCE: ':>12}{sentence}")
+        # if label != "": print(f"{f'TARGET: ':>12}{label}") 
+        # print(f"{f'PREDICTED: ':>12}", end='')
 
         # Generate the translation word by word
         while decoder_input.size(1) < seq_len:
@@ -66,7 +66,7 @@ def translate(sentence: str):
             decoder_input = torch.cat([decoder_input, torch.empty(1, 1).type_as(source).fill_(next_word.item()).to(device)], dim=1)
 
             # print the translated word
-            print(f"{tokenizer_tgt.decode([next_word.item()])}", end=' ')
+            # print(f"{tokenizer_tgt.decode([next_word.item()])}", end=' ')
 
             # break if we predict the end of sentence token
             if next_word == tokenizer_tgt.token_to_id('[EOS]'):
