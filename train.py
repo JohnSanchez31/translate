@@ -1,3 +1,5 @@
+import os
+
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
@@ -70,8 +72,9 @@ def run_validation(
     max_len,
     device, 
     print_msg, 
-    global_state, 
+    global_step, 
     writer, 
+    loss_fn,
     num_examples=2
 ):
     model.eval()
@@ -80,37 +83,130 @@ def run_validation(
     # Size of the control window (just use a default value)
     console_width = 80
 
+    total_loss = 0.0
+    total_batches = 0
+
+    with torch.no_grad():
+        for batch in validation_ds:
+
+            encoder_input = batch['encoder_input'].to(device)
+            decoder_input = batch['decoder_input'].to(device)
+            encoder_mask = batch['encoder_mask'].to(device)
+            decoder_mask = batch['decoder_mask'].to(device)
+            label = batch['label'].to(device)
+
+            # Forward pass
+            encoder_output = model.encode(
+                encoder_input,
+                encoder_mask
+            )
+
+            decoder_output = model.decode(
+                encoder_output,
+                encoder_mask,
+                decoder_input,
+                decoder_mask
+            )
+
+            proj_output = model.project(decoder_output)
+
+            loss = loss_fn(
+                proj_output.view(
+                    -1,
+                    tokenizer_tgt.get_vocab_size()
+                ),
+                label.view(-1)
+            )
+
+            total_loss += loss.item()
+            total_batches += 1
+
+            count += 1
+
+            if count <= num_examples:
+                assert encoder_input.size(0) == 1, "Batch size must be 1 for validation"
+
+                model_out = greedy_decode(
+                    model, 
+                    encoder_input, 
+                    encoder_mask, 
+                    tokenizer_src, 
+                    tokenizer_tgt, 
+                    max_len, 
+                    device
+                )
+
+                source_text = batch['src_text'][0]
+                target_text = batch['tgt_text'][0]
+                model_out_text = tokenizer_tgt.decode(model_out.detach().cpu().numpy())
+
+                # Print on the console
+                print_msg('-'*console_width)
+                print_msg(f"SOURCE: {source_text}")
+                print_msg(f"TARGET: {target_text}")
+                print_msg(f"PREDICTED: {model_out_text}")
+
+
+        
+        val_loss = val_loss = total_loss / max(total_batches, 1)
+
+        writer.add_scalar(
+            'validation_loss',
+            val_loss,
+            global_step
+        )
+
+        print_msg(f"Validation Loss: {val_loss:.4f}")
+
+        return val_loss
+
+
+def run_examples(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, device, print_msg, global_step, writer, num_examples=2):
+    model.eval()
+    count = 0
+
+    source_texts = []
+    expected = []
+    predicted = []
+
+    try:
+        # get the console window width
+        with os.popen('stty size', 'r') as console:
+            _, console_width = console.read().split()
+            console_width = int(console_width)
+    except:
+        # If we can't get the console width, use 80 as default
+        console_width = 80
+
     with torch.no_grad():
         for batch in validation_ds:
             count += 1
-            encoder_input = batch['encoder_input'].to(device)
-            encoder_mask = batch['encoder_mask'].to(device)
+            encoder_input = batch["encoder_input"].to(device) # (b, seq_len)
+            encoder_mask = batch["encoder_mask"].to(device) # (b, 1, 1, seq_len)
 
-            assert encoder_input.size(0) == 1, "Batch size must be 1 for validation"
+            # check that the batch size is 1
+            assert encoder_input.size(
+                0) == 1, "Batch size must be 1 for validation"
 
-            model_out = greedy_decode(
-                model, 
-                encoder_input, 
-                encoder_mask, 
-                tokenizer_src, 
-                tokenizer_tgt, 
-                max_len, 
-                device
-            )
+            model_out = greedy_decode(model, encoder_input, encoder_mask, tokenizer_src, tokenizer_tgt, max_len, device)
 
-            source_text = batch['src_text'][0]
-            target_text = batch['tgt_text'][0]
+            source_text = batch["src_text"][0]
+            target_text = batch["tgt_text"][0]
             model_out_text = tokenizer_tgt.decode(model_out.detach().cpu().numpy())
 
-            # Print on the console
+            source_texts.append(source_text)
+            expected.append(target_text)
+            predicted.append(model_out_text)
+            
+            # Print the source, target and model output
             print_msg('-'*console_width)
-            print_msg(f"SOURCE: {source_text}")
-            print_msg(f"TARGET: {target_text}")
-            print_msg(f"PREDICTED: {model_out_text}")
+            print_msg(f"{f'SOURCE: ':>12}{source_text}")
+            print_msg(f"{f'TARGET: ':>12}{target_text}")
+            print_msg(f"{f'PREDICTED: ':>12}{model_out_text}")
 
             if count == num_examples:
+                print_msg('-'*console_width)
                 break
-
 
 def get_all_sentences(ds, lang):
     for item in ds:
@@ -194,7 +290,7 @@ def get_ds(config):
     print(f"Max length of target sentence: {max_len_tgt}")
 
     train_dataloader = DataLoader(train_ds, batch_size=config["batch_size"], shuffle=True)
-    val_dataloader = DataLoader(val_ds, batch_size=1, shuffle=True)
+    val_dataloader = DataLoader(val_ds, batch_size=1, shuffle=False)
 
     return train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt
 
@@ -228,7 +324,9 @@ def train_model(config):
     # Tensorloss (allows you to watch the loss the graph)
     writer = SummaryWriter(config["experiment_name"])
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], betas=(0.9, 0.98), eps=1e-9)
+    # Change to 1.0 because the scheduler will adjust it, and we don't want to start with a very low learning rate
+    optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], betas=(0.9, 0.98), eps=1e-9) 
+    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=1, min_lr=1e-6)
 
     initial_epoch = 0
     global_step = 0
@@ -244,6 +342,7 @@ def train_model(config):
         model.load_state_dict(state['model_state_dict'])
         initial_epoch = state['epoch'] + 1
         optimizer.load_state_dict(state['optimizer_state_dict'])
+        # scheduler.load_state_dict(state['scheduler_state_dict']) # Loading the scheduler
         global_step = state['global_step']
     else:
         print("No model to preload, training from scratch")
@@ -290,27 +389,37 @@ def train_model(config):
             # Backpropagate the loss
             loss.backward()
 
+            # Gradient clipping (to avoid exploding gradients)
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                max_norm=1.0
+            )
+
             # Update the weights 
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
 
             global_step += 1
 
-        # Debugging: Print the norm of the embedding weights at the beginning of each epoch
-        print(model.src_embedding.embedding.weight.norm())
 
-        run_validation(
-            model, 
-            val_dataloader, 
-            tokenizer_src, 
-            tokenizer_tgt,
-            config['seq_len'], 
-            device, 
-            lambda msg: batch_iterator.write(msg), 
-            global_step, 
-            writer,
-            num_examples=3
-        )
+        if epoch % 2 == 0:
+            # Run validation every 2 epochs (you can change this value if you want to run it more or less often)
+            val_loss = run_validation(
+                model, 
+                val_dataloader, 
+                tokenizer_src, 
+                tokenizer_tgt,
+                config['seq_len'], 
+                device, 
+                lambda msg: batch_iterator.write(msg), 
+                global_step, 
+                writer,
+                loss_fn,
+                num_examples=3
+            )
+
+            # scheduler.step(val_loss) # Step the scheduler with the validation loss
+
 
         # Save the model at the end of every epoch
         model_filename = get_weights_file_path(config, f"{epoch:02d}")
@@ -318,6 +427,7 @@ def train_model(config):
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
+            # 'scheduler_state_dict': scheduler.state_dict(),
             'global_step': global_step
         }, model_filename)
 
